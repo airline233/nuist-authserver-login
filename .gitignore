@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.python-version
+
+# Secrets and generated authentication state
+*.pem
+*.key
+passkey*.json
+*passkey*.json
+nuist_cookies.json
+cookies*.json
+
+# Local output
+keys/
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
