@@ -27,6 +27,17 @@ python login_passkey.py passkey.local.json
 from NuistLogin import NuistLogin
 
 cookies = NuistLogin("202xxxxxxxxx", "passkey.local.json", service).login()
+
+# VPN 模式：vpn_cookies 可省略，省略时自动通过 CAS 回调获取，登录后可从
+# bot.vpn_cookies 取出缓存下来复用
+bot = NuistLogin("202xxxxxxxxx", "passkey.local.json", service, use_vpn=True)
+cookies = bot.login()
 ```
 
-第二个参数可以是 JSON 文件路径、JSON 文本，或已经解析好的 dict。`headless` 仍然接受但不再有作用；登录失败统一抛 `CredentialError`，网络层问题抛 `requests` 自身的异常。
+`NuistLogin.py` 也能直接跑：
+
+```bash
+python NuistLogin.py 202xxxxxxxxx passkey.local.json [--vpn] [--vpn-cookies vpn_cookies.json]
+```
+
+第二个参数可以是 JSON 文件路径、JSON 文本，或已经解析好的 dict。`headless` 仍然接受但不起作用（不启动浏览器）。凭据类失败抛 `CredentialError`，流程类失败抛 `LoginError`，网络层问题抛 `requests` 自身的异常；`CaptchaError` 仅为兼容旧代码保留，不会被抛出。

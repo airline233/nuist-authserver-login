@@ -14,6 +14,7 @@ passkey*.json
 *passkey*.json
 nuist_cookies.json
 cookies*.json
+*cookies*.json
 
 # Local output
 keys/
