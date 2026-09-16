@@ -33,7 +33,6 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
 
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
@@ -42,13 +41,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 BASE_URL = "https://authserver.nuist.edu.cn"
 LOGIN_URL = f"{BASE_URL}/authserver/login"
 START_ASSERTION_URL = f"{BASE_URL}/authserver/startAssertion"
-
-
-def make_login_url(service: str | None = None) -> str:
-    """登录页 URL；带 service 时用于登录后跳转到目标业务系统。"""
-    if not service:
-        return LOGIN_URL
-    return f"{LOGIN_URL}?service={requests.utils.quote(service, safe=':/')}"
 
 
 def b64url_encode(data: bytes) -> str:
@@ -65,25 +57,11 @@ def user_id_from_username(username: str) -> str:
     return b64url_encode(username.encode("utf-8"))
 
 
-def load_bundle(source: str | Path | dict[str, Any]) -> dict[str, Any]:
-    """bundle 可以是文件路径、JSON 文本，或已经解析好的 dict。"""
-    if isinstance(source, dict):
-        data: Any = source
-    else:
-        text = str(source).strip()
-        if text.startswith("{"):
-            raw = text
-        else:
-            try:
-                raw = Path(source).read_text(encoding="utf-8")
-            except OSError as exc:
-                raise RuntimeError(f"读取 bundle 失败：{exc}") from exc
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"解析 bundle 失败：{exc}") from exc
-    if not isinstance(data, dict):
-        raise RuntimeError("bundle 必须是 JSON 对象")
+def load_bundle(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"读取 bundle 失败：{exc}") from exc
 
     for name in ("rpId", "credentialId"):
         if not data.get(name):
@@ -113,7 +91,7 @@ def load_private_key(bundle: dict[str, Any]) -> ec.EllipticCurvePrivateKey:
     return key
 
 
-def create_session(login_url: str = LOGIN_URL) -> tuple[requests.Session, str]:
+def create_session() -> tuple[requests.Session, str]:
     session = requests.Session()
     session.headers.update(
         {
@@ -125,7 +103,7 @@ def create_session(login_url: str = LOGIN_URL) -> tuple[requests.Session, str]:
         }
     )
     response = session.get(
-        login_url,
+        LOGIN_URL,
         headers={"Accept": "text/html,application/xhtml+xml"},
         timeout=30,
     )
@@ -142,10 +120,7 @@ def create_session(login_url: str = LOGIN_URL) -> tuple[requests.Session, str]:
 
 
 def start_assertion(
-    session: requests.Session,
-    user_id: str,
-    start_id: str,
-    login_url: str = LOGIN_URL,
+    session: requests.Session, user_id: str, start_id: str
 ) -> dict[str, Any]:
     response = session.post(
         START_ASSERTION_URL,
@@ -155,7 +130,7 @@ def start_assertion(
             "Content-Type": "application/json;charset=utf-8",
             "X-Requested-With": "XMLHttpRequest",
             "Origin": BASE_URL,
-            "Referer": login_url,
+            "Referer": LOGIN_URL,
         },
         timeout=30,
     )
@@ -241,7 +216,6 @@ def submit_login(
     request_data: dict[str, Any],
     credential: dict[str, Any],
     execution: str,
-    login_url: str = LOGIN_URL,
 ) -> requests.Response:
     response_json = json.dumps(
         {
@@ -253,7 +227,7 @@ def submit_login(
         separators=(",", ":"),
     )
     return session.post(
-        login_url,
+        LOGIN_URL,
         data={
             "_eventId": "submit",
             "username": username,
@@ -267,61 +241,12 @@ def submit_login(
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Content-Type": "application/x-www-form-urlencoded",
             "Origin": BASE_URL,
-            "Referer": login_url,
+            "Referer": LOGIN_URL,
             "Upgrade-Insecure-Requests": "1",
         },
         allow_redirects=False,
         timeout=30,
     )
-
-
-def login_with_bundle(
-    bundle_source: str | Path | dict[str, Any],
-    username: str | None = None,
-    user_id: str | None = None,
-    start_id: str | None = None,
-    service: str | None = None,
-    origin: str = BASE_URL,
-    user_handle: str | None = None,
-    follow_redirect: bool = True,
-) -> requests.Session:
-    """完成一次 Passkey 登录，返回已认证的 requests.Session。
-
-    这是 NuistLogin.NuistLogin 兼容层的实现；bundle 可以是路径、JSON 文本或 dict。
-    """
-    bundle = load_bundle(bundle_source)
-    private_key = load_private_key(bundle)
-
-    resolved_user_id = user_id or bundle.get("userId")
-    if not resolved_user_id and username:
-        resolved_user_id = user_id_from_username(username)
-    if not resolved_user_id:
-        raise RuntimeError("缺少 userId：请使用新 bundle，或传入 user_id/username")
-
-    resolved_start_id = start_id or bundle.get("anonbiometricsd")
-    if not resolved_start_id:
-        raise RuntimeError("缺少 anonbiometricsd：请使用新 bundle，或传入 start_id")
-
-    login_url = make_login_url(service)
-    session, execution = create_session(login_url)
-    request_data = start_assertion(session, resolved_user_id, resolved_start_id, login_url)
-    credential = make_assertion(request_data, bundle, private_key, origin, user_handle)
-    # 表单里的 username 字段发的是 Base64URL 的 userId，不是明文学号。
-    response = submit_login(
-        session, resolved_user_id, request_data, credential, execution, login_url
-    )
-    if response.status_code not in (301, 302, 303, 307, 308):
-        raise RuntimeError(
-            f"登录未返回重定向：HTTP {response.status_code}\n"
-            f"响应前 500 字符：{response.text[:500]}"
-        )
-
-    location = response.headers.get("Location", "")
-    if follow_redirect and location:
-        landing = session.get(urljoin(login_url, location), allow_redirects=True, timeout=30)
-        if "authserver.nuist.edu.cn/authserver/login" in landing.url:
-            raise RuntimeError("登录后又跳回认证页，service 可能不正确或凭据已失效")
-    return session
 
 
 def parse_args() -> argparse.Namespace:
