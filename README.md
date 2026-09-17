@@ -13,6 +13,11 @@ Nuist SSO 一键登录一切校内服务的脚本
 4. Enjoy.
 > 请注意保存与确认凭据安全。Passkey登录无需二次验证手机号 故如凭据泄露请记得及时吊销对应 Passkey。
 
+## 从密码登录迁移到 Passkey
+
+1. 将NuistLogin.py替换为新版
+2. 将原传入的密码参数改成 Passkey JSON 文件名（相对路径或绝对路径）即可
+
 ## 使用
 
 命令行（只登录 authserver 自身，用于验证凭据可用）：
