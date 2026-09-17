@@ -39,10 +39,32 @@ bot = NuistLogin("202xxxxxxxxx", "passkey.local.json", service, use_vpn=True)
 cookies = bot.login()
 ```
 
+`user_agent` 可选，不传则用模块内置的 UA。
+
+### Cookie 格式
+
+`login()` 默认返回 `{name: value}`，和旧版一致。这种形式没有 domain/path，
+同名跨域 Cookie 会互相覆盖（authserver 和 jwxt 都会下发 `JSESSIONID`、`route`，
+最后只剩一条）。要完整作用域就传 `cookie_format="jar"`：
+
+```python
+from NuistLogin import NuistLogin, save_cookie_jar, load_cookie_jar
+
+jar = NuistLogin("202xxxxxxxxx", "passkey.local.json", service).login(cookie_format="jar")
+
+session = requests.Session()
+session.cookies.update(jar)          # 按域自动挑选，也可 requests.get(url, cookies=jar)
+
+save_cookie_jar(jar, "cookies.txt")  # 标准库 LWP 格式，含会话 Cookie
+jar = load_cookie_jar("cookies.txt")
+```
+
+命令行加 `--jar` 会把 Cookie 存成 `nuist_cookies.txt`（LWP 格式）而不是 `nuist_cookies.json`。
+
 `NuistLogin.py` 也能直接跑：
 
 ```bash
-python NuistLogin.py 202xxxxxxxxx passkey.local.json [--vpn] [--vpn-cookies vpn_cookies.json]
+python NuistLogin.py 202xxxxxxxxx passkey.local.json [--vpn] [--vpn-cookies vpn_cookies.json] [--jar]
 ```
 
 第二个参数可以是 JSON 文件路径、JSON 文本，或已经解析好的 dict。`headless` 仍然接受但不起作用（不启动浏览器）。凭据类失败抛 `CredentialError`，流程类失败抛 `LoginError`，网络层问题抛 `requests` 自身的异常；`CaptchaError` 仅为兼容旧代码保留，不会被抛出。
