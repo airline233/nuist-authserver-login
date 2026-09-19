@@ -9,8 +9,11 @@
    *        code === "0"          -> 无需二次验证，直接进入注册。
    *        其它（如 2106010002）  -> 二次验证已失效/需要验证。
    *   2. 需要二次验证时：直接模拟点击页面上的“绑定当前设备”，触发学校原生的
-   *      “身份验证”流程（登录密码 + 图形动态码），由页面自己完成真实校验。脚本
-   *      丢弃 /accountSecurity/isDeviceBinded 的放行信号
+   *      “身份验证”流程（登录密码 + 图形动态码），由页面自己完成真实校验。校验
+   *      通过后页面有两种走法，脚本把两者都当作放行信号：
+   *        a. 请求 /accountSecurity/isDeviceBinded -> 中止该请求，丢弃响应。
+   *        b. 不请求 a，直接弹出“绑定当前设备”设备名称录入框 -> 关闭该模态框。
+   *      两种方式都会掐断浏览器原生的添加流程。
    *   3. 收到该信号后，由脚本自己 POST startRegister -> 本地生成 ES256 软件凭据
    *      -> POST finishRegister。凭据与提交体的构造与 legacy/poc/passkey_registration_init.py 的早期 PoC 保持兼容。
    *
@@ -24,6 +27,7 @@
     apiBase: "/personalInfo",
     isUserRecheckNecessaryPath: "/common/isUserRecheckNecessary",
     isDeviceBindedMarker: "/accountSecurity/isDeviceBinded",
+    bindModalTitle: "绑定当前设备",
     startRegisterPath: "/accountSecurity/startRegister",
     finishRegisterPath: "/accountSecurity/finishRegister",
     credentialIdLength: 16,
@@ -223,18 +227,51 @@
     );
   };
 
-  // ---------- 拦截 isDeviceBinded 请求：放行信号 + 丢弃响应、中止浏览器原生添加流程 ----------
+  // ---------- 等待放行信号：isDeviceBinded 请求，或“绑定当前设备”模态框 ----------
 
-  function waitForDeviceBindedResponse(timeoutMs) {
+  // 页面原生的设备名称录入框。它出现就代表二次验证已通过、进入了原生创建流程。
+  // 必须排除还没显示出来的模态框：iView 可能提前把节点挂进 DOM，只判断“存在”会误判。
+  const isVisible = (element) =>
+    typeof element.checkVisibility === "function"
+      ? element.checkVisibility({ visibilityProperty: true })
+      : element.getClientRects().length > 0;
+
+  function findBindModal() {
+    for (const modal of document.querySelectorAll(".ivu-modal")) {
+      const label = modal.querySelector(".ivu-modal-header label");
+      if (label?.textContent.trim() !== CONFIG.bindModalTitle) continue;
+      if (isVisible(modal)) return modal;
+    }
+    return null;
+  }
+
+  // 优先走页面自己的关闭逻辑，直接摘 DOM 会留下遮罩层和被锁住的滚动条。
+  function dismissBindModal(modal) {
+    const closer =
+      modal.querySelector(".ivu-modal-footer button[title='取消']") ||
+      modal.querySelector(".base-modal-close, .ivu-modal-close");
+    if (closer) {
+      closer.click();
+      return;
+    }
+    (modal.closest(".ivu-modal-wrap") || modal).remove();
+  }
+
+  function waitForBindSignal(timeoutMs) {
     return new Promise((resolve, reject) => {
       const originalOpen = XMLHttpRequest.prototype.open;
       const originalSend = XMLHttpRequest.prototype.send;
       let settled = false;
-      const timer = setTimeout(() => finish(new Error("等待原生身份验证（isDeviceBinded）超时，请重新运行脚本")), timeoutMs);
+      let observer = null;
+      const timer = setTimeout(
+        () => finish(new Error("等待原生身份验证放行信号超时，请重新运行脚本")),
+        timeoutMs,
+      );
 
       const cleanup = () => {
         XMLHttpRequest.prototype.open = originalOpen;
         XMLHttpRequest.prototype.send = originalSend;
+        observer?.disconnect();
         clearTimeout(timer);
       };
       const finish = (error) => {
@@ -244,6 +281,7 @@
         error ? reject(error) : resolve();
       };
 
+      // 信号一：拦截 isDeviceBinded 请求，丢弃响应并中止原生添加流程。
       XMLHttpRequest.prototype.open = function (method, url, ...rest) {
         this.__nuistUrl = String(url);
         return originalOpen.call(this, method, url, ...rest);
@@ -255,6 +293,25 @@
         finish();
         this.abort();
       };
+
+      // 信号二（兜底）：页面有时不请求 isDeviceBinded，而是直接弹出设备名称录入框。
+      const checkBindModal = () => {
+        if (settled) return;
+        const modal = findBindModal();
+        if (!modal) return;
+        dismissBindModal(modal);
+        finish();
+      };
+      // 连 style/class 一起监听：模态框可能先挂载再显示，只看 childList 会漏掉显示那一刻。
+      // 这里不做一次立即检查：监听在点击之前就装好了，点击之后出现的都能抓到；
+      // 而运行脚本前页面上残留的同名模态框不代表验证已通过，扫到了反而会提前放行。
+      observer = new MutationObserver(checkBindModal);
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["style", "class"],
+      });
     });
   }
 
@@ -279,9 +336,10 @@
       throw new Error('未找到“绑定当前设备”入口，请打开“账户安全-通行密钥”页面后重试');
     }
 
-    // 先装好拦截，再模拟点击“绑定当前设备”触发页面原生流程（含真实的身份验证）。
-    // 脚本拦截 isDeviceBinded 请求作为放行信号，并丢弃响应、中止浏览器原生添加流程。
-    const waitPromise = waitForDeviceBindedResponse(CONFIG.verifyWaitTimeoutMs);
+    // 先装好监听，再模拟点击“绑定当前设备”触发页面原生流程（含真实的身份验证）。
+    // 验证通过后页面要么请求 isDeviceBinded，要么直接弹出设备名称录入框，
+    // 两者都算放行信号；脚本收到后掐断原生添加流程，转由自己完成注册。
+    const waitPromise = waitForBindSignal(CONFIG.verifyWaitTimeoutMs);
     bindButton.click();
     await waitPromise;
   }
